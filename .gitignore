@@ -1,0 +1,9 @@
+## Installation artifacts
+.config-make
+
+## Experimental
+dev
+
+## Vim (BTW™)
+*swp
+*swo

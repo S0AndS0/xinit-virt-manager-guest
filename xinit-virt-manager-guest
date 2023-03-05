@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+
+set -eE -o functrace
+
+## Optional, but recommended to find true directory this script resides in
+__SOURCE__="${BASH_SOURCE[0]}"
+while [[ -h "${__SOURCE__}" ]]; do
+    __SOURCE__="$(find "${__SOURCE__}" -type l -ls | sed -n 's@^.* -> \(.*\)@\1@p')"
+done
+__NAME__="${__SOURCE__##*/}"
+__DIR__="$(cd -P "$(dirname "${__SOURCE__}")" && pwd)"
+__AUTHOR__='S0AndS0'
+__DESCRIPTION__='Start and attach to VM guest from TTY'
+
+## Source module code within this script
+source "${__DIR__}/modules/trap-failure/failure.sh"
+
+trap 'failure "LINENO" "BASH_LINENO" "${BASH_COMMAND}" "${?}"' ERR
+
+
+## Defaults
+_display=2
+_virtual_terminal=2
+
+##
+#
+__license__(){
+  local __AUTHOR__="${__AUTHOR__:-S0AndS0}"
+  local _year
+  _year="$(date +'%Y')"
+  cat <<EOF
+Copyright (C) ${_year} ${__AUTHOR__}
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, version 3 of the License.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+EOF
+}
+
+##
+#
+__version__() {
+  local _version_number
+  _version_number="$(git tag --list v* | tail -n1)"
+  _version_number="${_version_number:-v0.1.0}"
+  _version_number="${_version_number//[^0-9.]/}"
+
+  printf '%s - %s\n' "${__NAME__}" "${_version_number}"
+  __license__ "${__AUTHOR__}"
+  printf '\nWritten by %s\n' "${__AUTHOR__}"
+}
+
+##
+#
+__usage__() {
+  local _message="${1}"
+  local _status="${2:-0}"
+
+  cat <<EOF
+${__DESCRIPTION__}
+
+
+Usage: ${__NAME__} [OPTIONS]...
+
+
+Options:
+--help
+    Prints this message and exits
+
+--license
+    Prints copyright for this script and exits
+
+--verbose
+    Prints messages about actions
+
+--version
+    Prints version for this script and exits
+
+--display 2
+  Display ID for xinit program to be attached to
+
+  Default: 2
+
+--vt      --virtual-terminal 2
+  TTY virtual terminal to execute commands for
+
+  Default: 2
+
+--name [NAME]
+  Name of virtual machien to launch
+
+
+Examples:
+    ${__NAME__} --name "arch"
+EOF
+
+  if (( ${#_message} )); then
+    printf >&2 '\n\nError: %s\n' "${_message}"
+    _status=1
+  fi
+
+  exit "${_status}"
+}
+
+##
+# Parse CLI parameters
+while (( ${#@} )); do
+  case "${1}" in
+    ## TODO: Consider passing to Xserver via xinit invocation
+    --)
+      shift 1
+      _pass_through_arguments=("${@}")
+      break
+    ;;
+    --version)
+      __version__
+      exit 0
+    ;;
+    --license)
+      __license__
+      exit 0
+    ;;
+    --help)
+      __usage__ ''
+    ;;
+    --verbose)
+      _verbose=1
+      shift 1
+    ;;
+    --list)
+      virsh list --all
+      exit 0
+    ;;
+    --display)
+      _display="${2}"
+      shift 2
+    ;;
+    --name)
+      _name="${2}"
+      shift 2
+    ;;
+    --vt|--virtual-terminal)
+      _virtual_terminal="${2}"
+      shift 2
+    ;;
+  esac
+done
+
+##
+# 1 - Mutates array reference for active guests
+# 2 - Mutates array reference for inactive guests
+#
+# Note: to run without `sudo` one may need to export `LIBVIRT_DEFAULT_URI`
+#   export LIBVIRT_DEFAULT_URI=qemu:///system
+get_available_names() {
+  local -n _ref_active_names="${1:?Undefined reference to active names list}"
+  local -n _ref_inactive_names="${2:?Undefined reference to inactive names list}"
+
+  IFS=$'\n' read -ra _ref_active_names -d '' <<<"$(
+    virsh list --state-running |
+      awk '{
+        if (NR > 2 && length($0)) {
+          print $2;
+        }
+      }'
+  )" || true
+
+  IFS=$'\n' read -ra _ref_inactive_names -d '' <<<"$(
+    virsh list --state-shutoff |
+      awk '{
+        if (NR > 2 && length($0)) {
+          print $2;
+        }
+      }'
+  )" || true
+}
+
+##
+#
+name_in_list() {
+  local -n _ref_inactive_names="${1:?Undefined reference to inactive names list}"
+  local _inactive_name
+
+  for _inactive_name in "${_ref_inactive_names[@]}"; do
+    if [[ "${_inactive_name}" == "${_name}" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+if ! (( ${#_name} )); then
+  __usage__ 'Undefined --name'
+fi
+
+if (( ${#DISPLAY} )); then
+  __usage__ 'DISPLAY already defined, please try from TTY'
+fi
+
+declare -a _active_names
+declare -a _inactive_names
+get_available_names '_active_names' '_inactive_names'
+
+_exe_path__virsh="$(which virsh)"
+_exe_path__virt_viewer="$(which virt-viewer)"
+
+_opts_virsh=(
+  start
+  "${_name}"
+)
+
+_opts_virt_viewer=(
+  '--hotkeys=toggle-fullscreen=shift+f11,release-cursor=shift+f12'
+  --display="${_display}"
+  --auto-resize always
+  --attach
+  # --kiosk
+  --shared
+  --wait
+  --reconnect
+  --full-screen
+  --connect
+  "${LIBVIRT_DEFAULT_URI:-qemu:///system}"
+  "${_name}"
+)
+
+_opts_xinit__extra=(
+  :"${_display}"
+  # vt"${_virtual_terminal}" -novtswitch
+  # -nodecoration
+  # -noconsole
+)
+
+if name_in_list '_inactive_names'; then
+  printf >&2 '"%s" %s && xinit "%s" %s -- :%s\n' \
+    "${_exe_path__virsh:?Cannot find executable 'virsh'}"\
+    "${_opts_virsh[*]}" \
+    "${_exe_path__virt_viewer:?Cannot find executable 'virt-viewer'}" \
+    "${_opts_virt_viewer[*]}" \
+    "${_opts_xinit__extra[*]}"
+
+  "${_exe_path__virsh}" "${_opts_virsh[@]}" && \
+    xinit "${_exe_path__virt_viewer}" "${_opts_virt_viewer[@]}" \
+      -- "${_opts_xinit__extra[@]}"
+elif name_in_list '_active_names'; then
+  printf >&2 'xinit "%s" %s -- %s\n' \
+    "${_exe_path__virt_viewer:?Cannot find executable 'virt-viewer'}" \
+    "${_opts_virt_viewer[*]}" \
+    "${_opts_xinit__extra[*]}"
+
+  xinit "${_exe_path__virt_viewer}" "${_opts_virt_viewer[@]}" \
+    -- "${_opts_xinit__extra[@]}"
+else
+  __usage__ '--name not in active or inactive state'
+fi
+

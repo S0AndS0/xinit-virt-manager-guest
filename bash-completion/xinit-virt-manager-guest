@@ -1,0 +1,45 @@
+# shellcheck disable=all
+# xinit-virt-manager-guest completion
+
+_xinit_virt_manager_guest() {
+    local cur prev words cword split
+    _init_completion || return
+
+    # default completion if parameter looks like a path
+    if [[ "${cur}" == @(*/|[.~])* ]]; then
+        _filedir
+        return
+    fi
+
+    case "${prev}" in
+        --help|--license|--list|--verbose|--version)
+            return
+        ;;
+        --display)
+            COMPREPLY=( $( compgen -W '2' -- ${cur} ) )
+            return
+        ;;
+        --name)
+            local _inactive_names
+
+            IFS=$'\n' read -rd '' _inactive_names <<<"$(
+              virsh list --all |
+                awk '{ if (NF > 2) { print $2; } }' |
+                tr $'\n' ' '
+            )" || true
+
+            COMPREPLY=( $( compgen -W "${_inactive_names}" -- ${cur} ) )
+            return
+        ;;
+    esac
+
+    # Parse help for any un-matched parameters
+    if [[ ${cur} == -* ]]; then
+        COMPREPLY=( $( compgen -W '$( _parse_help "${1}" )' -- "${cur}" ) )
+        [[ ${COMPREPLY} == *= ]] && compopt -o nospace
+        return
+    fi
+} &&
+complete -F _xinit_virt_manager_guest xinit-virt-manager-guest
+
+# ex: filetype=bash
